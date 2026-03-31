@@ -47,11 +47,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras
 
       - name: Run unit tests with coverage
         run: |
-          uv run pytest tests/ \
+          uv run python -m pytest tests/ \
             --cov=openbox_langgraph \
             --cov-report=xml:coverage.xml \
             --cov-report=term-missing \
