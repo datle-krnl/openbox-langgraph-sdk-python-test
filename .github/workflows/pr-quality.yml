@@ -50,6 +50,8 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run unit tests with coverage
+        id: unit_tests
+        continue-on-error: true
         run: |
           uv run python -m pytest tests/ \
             --cov=openbox_langgraph \
@@ -59,22 +61,34 @@ jobs:
             -v
 
       - name: Upload coverage report
+        if: ${{ always() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml
           path: coverage.xml
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload coverage to Codecov
-        if: ${{ env.CODECOV_TOKEN != '' }}
+        if: ${{ always() && env.CODECOV_TOKEN != '' && hashFiles('coverage.xml') != '' }}
+        continue-on-error: true
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
           flags: unittests
           name: pr-quality
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
           token: ${{ env.CODECOV_TOKEN }}
+
+      - name: Fail job if tests failed
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [ "${{ steps.unit_tests.outcome }}" = "failure" ]; then
+            echo "Unit tests or coverage threshold failed."
+            exit 1
+          fi
 
   build:
     name: Build
@@ -130,6 +144,7 @@ jobs:
 
       - name: Run Trivy SARIF scan for SonarQube import
         if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        id: sonarqube_trivy_scan
         continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
@@ -141,7 +156,7 @@ jobs:
           severity: HIGH,CRITICAL
           format: sarif
           output: trivy-sonar-results.sarif
-          exit-code: "0"
+          exit-code: "1"
           limit-severities-for-sarif: true
 
       - name: Install Gitleaks for SonarQube import
@@ -158,6 +173,7 @@ jobs:
 
       - name: Run Gitleaks SARIF scan for SonarQube import
         if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        id: sonarqube_gitleaks_scan
         continue-on-error: true
         shell: bash
         run: |
@@ -186,6 +202,8 @@ jobs:
 
       - name: SonarQube scan
         if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        id: sonarqube_scan
+        continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -194,3 +212,28 @@ jobs:
         with:
           args: >
             -Dsonar.sarifReportPaths=trivy-sonar-results.sarif,gitleaks-sonar-results.sarif
+
+      - name: Fail job if SonarQube scans failed
+        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        shell: bash
+        run: |
+          failed=false
+
+          if [ "${{ steps.sonarqube_trivy_scan.outcome }}" = "failure" ]; then
+            echo "Trivy SonarQube import scan failed."
+            failed=true
+          fi
+
+          if [ "${{ steps.sonarqube_gitleaks_scan.outcome }}" = "failure" ]; then
+            echo "Gitleaks SonarQube import scan failed."
+            failed=true
+          fi
+
+          if [ "${{ steps.sonarqube_scan.outcome }}" = "failure" ]; then
+            echo "SonarQube scan failed."
+            failed=true
+          fi
+
+          if [ "$failed" = true ]; then
+            exit 1
+          fi

@@ -30,6 +30,8 @@ jobs:
   trivy-fs:
     name: Trivy Filesystem Scan
     runs-on: ubuntu-latest
+    outputs:
+      scan_failed: ${{ steps.trivy_result.outputs.scan_failed }}
 
     steps:
       - name: Checkout repository
@@ -43,6 +45,7 @@ jobs:
 
 
       - name: Run Trivy filesystem scan for console output
+        id: trivy_fs_console
         continue-on-error: true
         shell: bash
         run: |
@@ -54,9 +57,10 @@ jobs:
             --severity HIGH,CRITICAL \
             --include-dev-deps \
             --format table \
-            --exit-code 0
+            --exit-code 1
 
       - name: Run Trivy filesystem scan for SARIF
+        id: trivy_fs_sarif
         continue-on-error: true
         shell: bash
         run: |
@@ -69,7 +73,7 @@ jobs:
             --include-dev-deps \
             --format sarif \
             --output trivy-fs-results.sarif \
-            --exit-code 0
+            --exit-code 1
 
       - name: Upload Trivy SARIF to GitHub Security
         if: always()
@@ -81,15 +85,32 @@ jobs:
 
       - name: Upload Trivy SARIF artifact
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: trivy-fs-results
           path: trivy-fs-results.sarif
-          if-no-files-found: error
+          if-no-files-found: warn
+
+      - name: Record Trivy scan result
+        id: trivy_result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          scan_failed=false
+
+          if [ "${{ steps.trivy_fs_console.outcome }}" = "failure" ] || [ "${{ steps.trivy_fs_sarif.outcome }}" = "failure" ]; then
+            echo "Trivy scan reported findings or encountered an error."
+            scan_failed=true
+          fi
+
+          echo "scan_failed=${scan_failed}" >> "$GITHUB_OUTPUT"
 
   gitleaks:
     name: Gitleaks
     runs-on: ubuntu-latest
+    outputs:
+      scan_failed: ${{ steps.gitleaks_result.outputs.scan_failed }}
 
     steps:
       - name: Checkout repository
@@ -109,6 +130,7 @@ jobs:
           gitleaks version
 
       - name: Run Gitleaks SARIF scan
+        id: gitleaks_scan
         continue-on-error: true
         shell: bash
         run: |
@@ -130,8 +152,51 @@ jobs:
 
       - name: Upload Gitleaks SARIF artifact
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: gitleaks-results
           path: gitleaks-results.sarif
-          if-no-files-found: error
+          if-no-files-found: warn
+
+      - name: Record Gitleaks scan result
+        id: gitleaks_result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          scan_failed=false
+
+          if [ "${{ steps.gitleaks_scan.outcome }}" = "failure" ]; then
+            echo "Gitleaks reported findings or encountered an error."
+            scan_failed=true
+          fi
+
+          echo "scan_failed=${scan_failed}" >> "$GITHUB_OUTPUT"
+
+  security-gate:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    needs:
+      - trivy-fs
+      - gitleaks
+    if: ${{ always() }}
+
+    steps:
+      - name: Fail if any security scan failed
+        shell: bash
+        run: |
+          failed=false
+
+          if [ "${{ needs.trivy-fs.result }}" != "success" ] || [ "${{ needs.trivy-fs.outputs.scan_failed }}" = "true" ]; then
+            echo "Trivy filesystem scan failed."
+            failed=true
+          fi
+
+          if [ "${{ needs.gitleaks.result }}" != "success" ] || [ "${{ needs.gitleaks.outputs.scan_failed }}" = "true" ]; then
+            echo "Gitleaks scan failed."
+            failed=true
+          fi
+
+          if [ "$failed" = true ]; then
+            exit 1
+          fi
